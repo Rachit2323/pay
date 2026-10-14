@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dodo_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dodo_payments
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  invoice_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dodo_invoice_service
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dodo_payments
+      PSP_BASE_URL: http://mock_psp:3001
+      # Development only: seeds a demo business and API key so the README curl examples work.
+      DEV_API_KEY: biz_test_key_12345
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  mock_psp:
+    build:
+      context: ./mock_psp
+      dockerfile: Dockerfile
+    container_name: dodo_mock_psp
+    ports:
+      - "3001:3001"
+    environment:
+      RUST_LOG: info
+    restart: on-failure
+
+volumes:
+  postgres_data:

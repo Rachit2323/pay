@@ -1,0 +1,23 @@
+# Build output
+/target
+mock_psp/target
+
+# Dependencies
+node_modules/
+
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+
+# Local demo helper (not part of the submission)
+/examples/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~

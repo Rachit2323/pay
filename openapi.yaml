@@ -1,0 +1,287 @@
+openapi: 3.0.3
+info:
+  title: Dodo Payments - Invoice & Payment Service
+  version: 0.2.0
+  description: |
+    Invoices, customers, idempotent payment attempts against a PSP, and signed webhooks.
+    All money is integer USD cents. Every error uses the same body: `{"error": "...", "code": "..."}`.
+
+servers:
+  - url: http://localhost:3000
+
+security:
+  - ApiKey: []
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      description: "API key, sent as `Authorization: Bearer <key>`. Shown once when issued."
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique per logical payment (1-255 chars). Reuse with the same body returns the stored result.
+      schema: { type: string, maxLength: 255 }
+
+  responses:
+    BadRequest:
+      description: Validation or malformed-request error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found in this business
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflicts with current state (e.g. payment in progress, duplicate email)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string, example: "Cannot pay invoice in paid state" }
+        code:
+          type: string
+          example: invalid_state_for_payment
+          description: >
+            One of: unauthorized, missing_idempotency_key, invalid_body, invalid_id, validation_error,
+            customer_not_found, invoice_not_found, customer_email_exists, webhook_exists,
+            invalid_state_filter, invalid_state_for_payment, payment_in_progress,
+            idempotency_key_reused, internal_error
+
+    Customer:
+      type: object
+      required: [id, business_id, name, email, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        created_at: { type: string, format: date-time }
+
+    CreateCustomer:
+      type: object
+      required: [name, email]
+      properties:
+        name: { type: string, maxLength: 255 }
+        email: { type: string, maxLength: 255 }
+
+    LineItem:
+      type: object
+      required: [description, quantity, unit_amount_cents]
+      properties:
+        description: { type: string, maxLength: 255 }
+        quantity: { type: integer, format: int64, minimum: 1 }
+        unit_amount_cents: { type: integer, format: int64, minimum: 0 }
+
+    CreateInvoice:
+      type: object
+      required: [customer_id, due_date, line_items]
+      description: Any client-supplied total is ignored. The server computes it from line items.
+      properties:
+        customer_id: { type: string, format: uuid }
+        due_date: { type: string, format: date-time }
+        line_items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/LineItem" }
+
+    Invoice:
+      type: object
+      required: [id, business_id, customer_id, state, total_amount_cents, due_date, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        state: { type: string, enum: [open, paid] }
+        total_amount_cents: { type: integer, format: int64, minimum: 1 }
+        due_date: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PayInvoice:
+      type: object
+      required: [card_token]
+      properties:
+        card_token:
+          type: string
+          example: tok_success
+          description: "Mock PSP token: tok_success, tok_card_declined, tok_insufficient_funds, tok_timeout, tok_network_error."
+
+    PaymentAttempt:
+      type: object
+      required: [id, invoice_id, business_id, idempotency_key, status, amount_cents, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+          description: pending means the PSP outcome is not yet known. The invoice stays open.
+        psp_reference: { type: string, nullable: true }
+        error_code: { type: string, nullable: true, example: card_declined }
+        error_message: { type: string, nullable: true }
+        amount_cents: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Webhook:
+      type: object
+      required: [id, business_id, endpoint_url, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        endpoint_url: { type: string, format: uri }
+        created_at: { type: string, format: date-time }
+
+    RegisteredWebhook:
+      allOf:
+        - $ref: "#/components/schemas/Webhook"
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: HMAC signing secret. Returned only once; store it.
+
+
+paths:
+  /customers:
+    post:
+      summary: Create a customer
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateCustomer" } } }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Customer" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      summary: List customers for this business
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Customer" } }
+
+  /customers/{id}:
+    get:
+      summary: Get a customer
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Customer" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invoices:
+    post:
+      summary: Create an open invoice
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateInvoice" } } }
+      responses:
+        "201":
+          description: Created (state is open)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      summary: List invoices, optionally filtered by state
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema: { type: string, enum: [open, paid] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Invoice" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /invoices/{id}:
+    get:
+      summary: Get an invoice
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invoices/{id}/pay:
+    post:
+      summary: Attempt payment for an open invoice
+      description: |
+        Idempotent per `Idempotency-Key`. At most one live (pending or succeeded) charge exists per invoice.
+        Returns 200 with a final attempt (succeeded or failed), or 202 with a pending attempt when the PSP
+        outcome is unknown (timeout, network error, 5xx). Retry with the same key to re-check; the PSP
+        dedupes by attempt id, so this never creates a second charge.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PayInvoice" } } }
+      responses:
+        "200":
+          description: Final result (succeeded or failed). Replays of a final attempt return the same body.
+          content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } }
+        "202":
+          description: Outcome unknown; attempt is pending. Retry with the same key.
+          content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } }
+        "400":
+          description: Missing key, invalid body, or invoice not open (code invalid_state_for_payment)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Another payment is in flight for this invoice (code payment_in_progress)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: Idempotency-Key was used before with a different invoice or card token (code idempotency_key_reused)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /webhooks:
+    post:
+      summary: Register a webhook endpoint
+      description: Returns the signing secret once. Verify deliveries with the `Dodo-Signature` header.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_url]
+              properties:
+                endpoint_url: { type: string, format: uri, example: "https://example.com/webhooks/dodo" }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/RegisteredWebhook" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
